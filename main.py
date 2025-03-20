@@ -84,9 +84,17 @@ async def read_root(request: Request):
 @app.post("/process")
 async def process_file(file: UploadFile = File(...)):
     try:
-        # Lê o arquivo Excel
-        contents = await file.read()
-        df = pd.read_excel(io.BytesIO(contents))
+        # Verifica se é um arquivo Excel
+        if not file.filename.endswith(('.xlsx', '.xls')):
+            raise ValueError("Por favor, envie apenas arquivos Excel (.xlsx ou .xls)")
+
+        # Lê o arquivo Excel com tratamento de erro
+        try:
+            contents = await file.read()
+            df = pd.read_excel(io.BytesIO(contents), engine='openpyxl')
+        except Exception as e:
+            logger.error(f"Erro ao ler arquivo Excel: {str(e)}")
+            raise ValueError("Erro ao ler o arquivo Excel. Verifique se o arquivo está corrompido ou no formato correto.")
         
         # Lista de colunas possíveis
         source_columns = ['Source url', 'Source URL', 'Source URL (from)', 'Source URL (to)', 'Source']
@@ -95,35 +103,55 @@ async def process_file(file: UploadFile = File(...)):
         
         domains = []
         
-        # Primeiro tenta ler da coluna B (índice 1)
-        if len(df.columns) > 1:
-            domains = df.iloc[:, 1].dropna().unique().tolist()
-        
-        # Se não encontrou domínios na coluna B, tenta outras colunas
-        if not domains:
-            # Procura por colunas conhecidas
-            for col in df.columns:
-                if col in source_columns or col in target_columns or col in domain_columns:
-                    domains.extend(df[col].dropna().unique().tolist())
-        
-        # Se ainda não encontrou domínios, tenta qualquer coluna que pareça conter URLs
-        if not domains:
-            for col in df.columns:
-                sample = str(df[col].iloc[0]).lower()
-                if 'http' in sample or '.br' in sample:
-                    domains.extend(df[col].dropna().unique().tolist())
+        try:
+            # Primeiro tenta ler da coluna B (índice 1)
+            if len(df.columns) > 1:
+                domains = df.iloc[:, 1].dropna().unique().tolist()
+                logger.info(f"Encontrados {len(domains)} domínios na coluna B")
+            
+            # Se não encontrou domínios na coluna B, tenta outras colunas
+            if not domains:
+                # Procura por colunas conhecidas
+                for col in df.columns:
+                    if col in source_columns or col in target_columns or col in domain_columns:
+                        new_domains = df[col].dropna().unique().tolist()
+                        domains.extend(new_domains)
+                        logger.info(f"Encontrados {len(new_domains)} domínios na coluna {col}")
+            
+            # Se ainda não encontrou domínios, tenta qualquer coluna que pareça conter URLs
+            if not domains:
+                for col in df.columns:
+                    try:
+                        sample = str(df[col].iloc[0]).lower()
+                        if 'http' in sample or '.br' in sample:
+                            new_domains = df[col].dropna().unique().tolist()
+                            domains.extend(new_domains)
+                            logger.info(f"Encontrados {len(new_domains)} domínios na coluna {col}")
+                    except:
+                        continue
+        except Exception as e:
+            logger.error(f"Erro ao extrair domínios das colunas: {str(e)}")
+            raise ValueError("Erro ao processar as colunas do arquivo. Verifique o formato do arquivo.")
         
         # Remove duplicatas
         domains = list(set(domains))
+        logger.info(f"Total de domínios encontrados (com duplicatas removidas): {len(domains)}")
         
         # Limpa os domínios
-        domains = [extract_domain(domain) for domain in domains if domain]
-        domains = [d for d in domains if d and d.endswith(('.br', '.com.br'))]
+        cleaned_domains = []
+        for domain in domains:
+            try:
+                clean_domain = extract_domain(domain)
+                if clean_domain and clean_domain.endswith(('.br', '.com.br')):
+                    cleaned_domains.append(clean_domain)
+            except:
+                continue
+        
+        domains = list(set(cleaned_domains))  # Remove duplicatas novamente após limpeza
+        logger.info(f"Total de domínios .br/.com.br válidos: {len(domains)}")
         
         if not domains:
-            raise ValueError("Nenhum domínio .br/.com.br encontrado no arquivo")
-        
-        logger.info(f"Total de domínios únicos encontrados: {len(domains)}")
+            raise ValueError("Nenhum domínio .br/.com.br válido encontrado no arquivo")
         
         # Gera um ID único para este processamento
         process_id = str(time.time())
@@ -135,7 +163,8 @@ async def process_file(file: UploadFile = File(...)):
             "total": len(domains),
             "available": 0,
             "available_domains": [],
-            "current_domain": ""
+            "current_domain": "",
+            "error": None
         }
         
         # Inicia o processamento em background
@@ -143,9 +172,12 @@ async def process_file(file: UploadFile = File(...)):
         
         return {"process_id": process_id, "message": "Processamento iniciado"}
         
+    except ValueError as e:
+        logger.error(f"Erro de validação: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.error(f"Erro ao processar arquivo: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Erro inesperado ao processar arquivo: {str(e)}")
+        raise HTTPException(status_code=500, detail="Erro interno ao processar o arquivo. Por favor, tente novamente.")
 
 @app.get("/progress/{process_id}")
 async def get_progress(process_id: str):
