@@ -82,6 +82,10 @@ def verify_domain_sync(domain: str) -> bool:
             
         try:
             w = whois.whois(domain)
+            # Para domínios .br, verificamos se o domínio existe no registro
+            if domain.endswith('.br') or domain.endswith('.com.br'):
+                # Se o domínio não existe no registro, está disponível
+                return w.domain_name is None or (isinstance(w.domain_name, list) and not w.domain_name)
             return w.domain_name is None
         except Exception as e:
             logger.error(f"Erro na consulta whois para {domain}: {str(e)}")
