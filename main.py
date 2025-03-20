@@ -33,32 +33,28 @@ def extract_domain(url: str) -> str:
     if not url or not isinstance(url, str):
         return ""
     try:
-        # Se já parece ser um domínio limpo, retorna ele
-        if re.match(r'^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', str(url)):
-            return url.lower()
-            
         # Remove protocolo e www se existirem
-        url = re.sub(r'^https?://(www\.)?', '', str(url))
+        url = re.sub(r'^https?://(www\.)?', '', str(url).strip().lower())
         # Remove tudo após a primeira barra ou espaço
-        url = re.split(r'[/\s]', url)[0]
-        # Remove qualquer parâmetro que possa ter ficado
-        url = url.split('?')[0].split('#')[0]
-        # Remove qualquer texto após o domínio
-        url = url.split(':')[0]  # Remove porta se houver
-        # Limpa o domínio
-        domain = url.strip().lower()
+        domain = re.split(r'[/\s]', url)[0]
+        # Remove qualquer parâmetro
+        domain = domain.split('?')[0].split('#')[0]
+        # Remove porta se houver
+        domain = domain.split(':')[0]
         
-        # Verifica se é um subdomínio e extrai o domínio principal
+        # Verifica se é um domínio válido
+        if not re.match(r'^[a-z0-9.-]+\.[a-z]{2,}$', domain):
+            return ""
+            
+        # Se é um subdomínio, pega apenas o domínio principal
         parts = domain.split('.')
-        if len(parts) > 2:
-            # Se termina em .com.br, pega os últimos 3 níveis
-            if domain.endswith('.com.br'):
-                domain = '.'.join(parts[-3:])
-            # Se termina em .br, pega os últimos 2 níveis
-            elif domain.endswith('.br'):
-                domain = '.'.join(parts[-2:])
-        
+        if domain.endswith('.com.br') and len(parts) > 3:
+            return '.'.join(parts[-3:])
+        elif domain.endswith('.br') and len(parts) > 2:
+            return '.'.join(parts[-2:])
+            
         return domain
+        
     except Exception as e:
         logger.error(f"Erro ao extrair domínio de {url}: {str(e)}")
         return ""
@@ -183,75 +179,46 @@ async def process_file(file: UploadFile = File(...)):
         filename_lower = file.filename.lower()
         
         try:
-            # Verifica o tipo de arquivo pelo nome
+            # Determina qual coluna usar baseado no nome do arquivo
+            target_column = None
             if 'back' in filename_lower and 'link' in filename_lower:
-                # Para arquivos de backlinks, usa a coluna C
-                if len(df.columns) > 2:
-                    col_data = df.iloc[:, 2].dropna().astype(str)  # Coluna C (índice 2)
-                    if not col_data.empty:
-                        # Para backlinks, processa cada URL para extrair o domínio
-                        for url in col_data:
-                            domain = extract_domain(url)
-                            if domain:
-                                domains.append(domain)
-                        logger.info(f"Arquivo de backlinks - Encontrados {len(domains)} domínios na coluna C")
-            
+                if len(df.columns) > 2:  # Tem coluna C
+                    target_column = 2  # Índice da coluna C
+                    logger.info("Usando coluna C para arquivo de backlinks")
             elif 'outbound' in filename_lower:
-                # Para arquivos outbound, usa a coluna B que já contém domínios
-                if len(df.columns) > 1:
-                    col_data = df.iloc[:, 1].dropna().astype(str)  # Coluna B (índice 1)
-                    if not col_data.empty:
-                        domains.extend(col_data.tolist())
-                        logger.info(f"Arquivo outbound - Encontrados {len(domains)} domínios na coluna B")
+                if len(df.columns) > 1:  # Tem coluna B
+                    target_column = 1  # Índice da coluna B
+                    logger.info("Usando coluna B para arquivo outbound")
             
-            # Se não encontrou domínios pelo nome do arquivo, tenta outras estratégias
+            if target_column is None:
+                raise ValueError("Formato de arquivo não reconhecido ou coluna necessária não encontrada")
+            
+            # Lê os dados da coluna alvo
+            col_data = df.iloc[:, target_column].dropna().astype(str)
+            if col_data.empty:
+                raise ValueError("Nenhum dado encontrado na coluna esperada")
+            
+            # Processa cada valor da coluna
+            for value in col_data:
+                domain = extract_domain(value)
+                if domain and domain.endswith(('.br', '.com.br')):
+                    domains.append(domain)
+            
+            # Remove duplicatas
+            domains = list(set(domains))
+            logger.info(f"Total de domínios únicos encontrados: {len(domains)}")
+            
             if not domains:
-                # Tenta encontrar uma coluna que contenha "domain" no nome
-                domain_columns = [col for col in df.columns if 'domain' in str(col).lower()]
-                
-                if domain_columns:
-                    # Se encontrou coluna de domínio, usa ela
-                    for col in domain_columns:
-                        col_data = df[col].dropna().astype(str)
-                        for value in col_data:
-                            domain = extract_domain(value)
-                            if domain:
-                                domains.append(domain)
-                    logger.info(f"Encontrados {len(domains)} domínios na(s) coluna(s) de domínio")
-                
-                # Se ainda não encontrou, tenta outras colunas
-                if not domains:
-                    for col in df.columns:
-                        try:
-                            col_data = df[col].dropna().astype(str)
-                            if not col_data.empty and any(('.br' in str(x).lower() or 'http' in str(x).lower()) for x in col_data.head()):
-                                for value in col_data:
-                                    domain = extract_domain(value)
-                                    if domain:
-                                        domains.append(domain)
-                                logger.info(f"Encontrados domínios na coluna {col}")
-                        except Exception as col_error:
-                            logger.error(f"Erro ao processar coluna {col}: {str(col_error)}")
-                            continue
-                        
-            if not domains:
-                raise ValueError("Nenhum domínio encontrado no arquivo")
-                
+                raise ValueError("Nenhum domínio .br/.com.br válido encontrado no arquivo")
+            
+            if len(domains) > 100:
+                logger.warning(f"Limitando processamento a 100 domínios dos {len(domains)} encontrados")
+                domains = domains[:100]  # Limita a 100 domínios para evitar timeout
+            
         except Exception as e:
             logger.error(f"Erro ao extrair domínios: {str(e)}")
-            raise ValueError("Erro ao processar as colunas do arquivo. Verifique o formato do arquivo.")
+            raise ValueError(str(e))
         
-        # Remove duplicatas e filtra domínios .br/.com.br
-        domains = [d for d in set(domains) if d and d.endswith(('.br', '.com.br'))]
-        logger.info(f"Total de domínios únicos .br/.com.br encontrados: {len(domains)}")
-        
-        if not domains:
-            raise ValueError("Nenhum domínio .br/.com.br válido encontrado no arquivo")
-        
-        if len(domains) > 100:
-            logger.warning(f"Limitando processamento a 100 domínios dos {len(domains)} encontrados")
-            domains = domains[:100]  # Limita a 100 domínios para evitar timeout
-            
         # Gera um ID único para este processamento
         process_id = str(time.time())
         
