@@ -33,19 +33,33 @@ def extract_domain(url: str) -> str:
     if not url or not isinstance(url, str):
         return ""
     try:
+        # Se já parece ser um domínio limpo, retorna ele
+        if re.match(r'^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', str(url)):
+            return url.lower()
+            
         # Remove protocolo e www se existirem
         url = re.sub(r'^https?://(www\.)?', '', str(url))
-        # Pega apenas o domínio (primeira parte antes da primeira barra)
-        domain = url.split('/')[0].strip().lower()
+        # Remove tudo após a primeira barra ou espaço
+        url = re.split(r'[/\s]', url)[0]
+        # Remove qualquer parâmetro que possa ter ficado
+        url = url.split('?')[0].split('#')[0]
+        # Limpa o domínio
+        domain = url.strip().lower()
         return domain
-    except:
+    except Exception as e:
+        logger.error(f"Erro ao extrair domínio de {url}: {str(e)}")
         return ""
 
 def verify_domain_sync(domain: str) -> bool:
     """Versão síncrona da verificação de domínio."""
     try:
         domain = domain.strip().lower()
-        if not domain or not domain.endswith(('.br', '.com.br')):
+        if not domain:
+            return False
+            
+        # Verifica se é um domínio .br ou .com.br
+        if not domain.endswith(('.br', '.com.br')):
+            logger.info(f"Domínio {domain} não é .br ou .com.br")
             return False
             
         if domain.startswith('www.'):
@@ -53,7 +67,15 @@ def verify_domain_sync(domain: str) -> bool:
             
         try:
             w = whois.whois(domain)
-            return w.domain_name is None
+            is_available = w.domain_name is None
+            
+            if is_available:
+                logger.info(f"Domínio {domain} está disponível")
+            else:
+                logger.info(f"Domínio {domain} não está disponível")
+                
+            return is_available
+            
         except Exception as e:
             logger.error(f"Erro na consulta whois para {domain}: {str(e)}")
             return False
@@ -145,23 +167,49 @@ async def process_file(file: UploadFile = File(...)):
             raise ValueError("Erro ao ler o arquivo Excel. Verifique se o arquivo está corrompido ou no formato correto.")
         
         domains = []
+        filename_lower = file.filename.lower()
         
         try:
-            # Primeiro tenta ler da coluna B (índice 1)
-            if len(df.columns) > 1:
-                col_data = df.iloc[:, 1].dropna().astype(str)
-                if not col_data.empty:
-                    domains.extend(col_data.tolist())
+            # Verifica o tipo de arquivo pelo nome
+            if 'back' in filename_lower and 'link' in filename_lower:
+                # Para arquivos de backlinks, usa a coluna C
+                if len(df.columns) > 2:
+                    col_data = df.iloc[:, 2].dropna().astype(str)  # Coluna C (índice 2)
+                    if not col_data.empty:
+                        domains.extend(col_data.tolist())
+                        logger.info(f"Arquivo de backlinks - Encontrados {len(domains)} domínios na coluna C")
             
-            # Se não encontrou domínios, tenta outras colunas
+            elif 'outbound' in filename_lower:
+                # Para arquivos outbound, usa a coluna B
+                if len(df.columns) > 1:
+                    col_data = df.iloc[:, 1].dropna().astype(str)  # Coluna B (índice 1)
+                    if not col_data.empty:
+                        domains.extend(col_data.tolist())
+                        logger.info(f"Arquivo outbound - Encontrados {len(domains)} domínios na coluna B")
+            
+            # Se não encontrou domínios pelo nome do arquivo, tenta outras estratégias
             if not domains:
-                for col in df.columns:
-                    try:
+                # Tenta encontrar uma coluna que contenha "domain" no nome
+                domain_columns = [col for col in df.columns if 'domain' in str(col).lower()]
+                
+                if domain_columns:
+                    # Se encontrou coluna de domínio, usa ela
+                    for col in domain_columns:
                         col_data = df[col].dropna().astype(str)
-                        if not col_data.empty and any('.br' in str(x).lower() for x in col_data.head()):
-                            domains.extend(col_data.tolist())
-                    except:
-                        continue
+                        domains.extend(col_data.tolist())
+                    logger.info(f"Encontrados {len(domains)} domínios na(s) coluna(s) de domínio")
+                
+                # Se ainda não encontrou, tenta outras colunas
+                if not domains:
+                    for col in df.columns:
+                        try:
+                            col_data = df[col].dropna().astype(str)
+                            if not col_data.empty and any(('.br' in str(x).lower() or 'http' in str(x).lower()) for x in col_data.head()):
+                                domains.extend(col_data.tolist())
+                                logger.info(f"Encontrados domínios na coluna {col}")
+                        except Exception as col_error:
+                            logger.error(f"Erro ao processar coluna {col}: {str(col_error)}")
+                            continue
                         
             if not domains:
                 raise ValueError("Nenhum domínio encontrado no arquivo")
@@ -177,16 +225,20 @@ async def process_file(file: UploadFile = File(...)):
                 clean_domain = extract_domain(str(domain))
                 if clean_domain and clean_domain.endswith(('.br', '.com.br')):
                     cleaned_domains.append(clean_domain)
-            except:
+                    logger.info(f"Domínio extraído: {clean_domain}")
+            except Exception as clean_error:
+                logger.error(f"Erro ao limpar domínio {domain}: {str(clean_error)}")
                 continue
         
         # Remove duplicatas
         domains = list(set(cleaned_domains))
+        logger.info(f"Total de domínios únicos encontrados: {len(domains)}")
         
         if not domains:
             raise ValueError("Nenhum domínio .br/.com.br válido encontrado no arquivo")
         
         if len(domains) > 100:
+            logger.warning(f"Limitando processamento a 100 domínios dos {len(domains)} encontrados")
             domains = domains[:100]  # Limita a 100 domínios para evitar timeout
             
         # Gera um ID único para este processamento
