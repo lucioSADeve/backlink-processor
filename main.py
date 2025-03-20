@@ -227,22 +227,11 @@ async def process_file(file: UploadFile = File(...)):
 
 @app.get("/progress/{process_id}")
 async def get_progress(process_id: str):
-    """Endpoint para receber atualizações de progresso via SSE."""
-    async def event_generator():
-        while True:
-            if process_id not in processing_status:
-                yield "data: " + json.dumps({"error": "Processo não encontrado"}) + "\n\n"
-                break
-                
-            status = processing_status[process_id]
-            if status["status"] in ["completed", "error"]:
-                yield "data: " + json.dumps(status) + "\n\n"
-                break
-                
-            yield "data: " + json.dumps(status) + "\n\n"
-            await asyncio.sleep(1)
+    """Endpoint para verificar o progresso do processamento."""
+    if process_id not in processing_status:
+        raise HTTPException(status_code=404, detail="Processo não encontrado")
     
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    return JSONResponse(content=processing_status[process_id])
 
 @app.get("/download/{filename}")
 async def download_file(filename: str):
@@ -251,10 +240,12 @@ async def download_file(filename: str):
         # Procura o arquivo em todos os processos
         for process_id, status in processing_status.items():
             if status.get("output_file") == filename and status.get("file_data"):
-                return StreamingResponse(
-                    io.BytesIO(status["file_data"]),
-                    media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    headers={"Content-Disposition": f"attachment; filename={filename}"}
+                return JSONResponse(
+                    content={
+                        "status": "success",
+                        "file_data": status["file_data"].decode('utf-8'),
+                        "filename": filename
+                    }
                 )
         raise HTTPException(status_code=404, detail="Arquivo não encontrado")
     except Exception as e:

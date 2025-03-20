@@ -343,67 +343,96 @@
         }
 
         function startProgressMonitoring(processId) {
-            const eventSource = new EventSource(`/progress/${processId}`);
+            let pollInterval;
             
-            eventSource.onmessage = function(event) {
-                const data = JSON.parse(event.data);
-                
-                if (data.error) {
-                    eventSource.close();
-                    document.getElementById('statusMessage').textContent = 'Erro: ' + data.error;
-                    document.getElementById('statusMessage').className = 'status error';
-                    return;
-                }
-                
-                // Atualiza o progresso
-                updateProgress(data.processed, data.total, data.available);
-                
-                // Atualiza a mensagem de status
-                document.getElementById('statusMessage').textContent = 
-                    `Processando: ${data.current_domain || 'Iniciando...'}`;
-                
-                // Atualiza a lista de domínios disponíveis
-                if (data.available_domains && data.available_domains.length > 0) {
-                    const domainsList = document.getElementById('domainsList');
-                    domainsList.innerHTML = ''; // Limpa a lista atual
-                    data.available_domains.forEach(domain => {
-                        addDomainToList(domain);
-                    });
-                    document.getElementById('availableDomains').style.display = 'block';
-                }
-                
-                // Se o processamento terminou
-                if (data.status === 'completed') {
-                    eventSource.close();
-                    document.getElementById('statusMessage').textContent = 
-                        `Processamento concluído! ${data.available} domínios disponíveis encontrados.`;
-                    document.getElementById('statusMessage').className = 'status success';
-                    
-                    // Configura o botão de copiar todos
-                    const copyAllButton = document.getElementById('copyAllButton');
-                    copyAllButton.onclick = () => {
-                        const domains = data.available_domains.join('\n');
-                        navigator.clipboard.writeText(domains).then(() => {
-                            copyAllButton.textContent = 'Copiado!';
-                            setTimeout(() => {
-                                copyAllButton.textContent = 'Copiar Todos';
-                            }, 2000);
-                        });
-                    };
-                    
-                    // Faz o download automático do arquivo
-                    if (data.output_file) {
-                        window.location.href = `/download/${data.output_file}`;
+            async function checkProgress() {
+                try {
+                    const response = await fetch(`/progress/${processId}`);
+                    if (!response.ok) {
+                        throw new Error('Erro ao verificar progresso');
                     }
+                    
+                    const data = await response.json();
+                    
+                    // Atualiza o progresso
+                    updateProgress(data.processed, data.total, data.available);
+                    
+                    // Atualiza a mensagem de status
+                    document.getElementById('statusMessage').textContent = 
+                        `Processando: ${data.current_domain || 'Iniciando...'}`;
+                    
+                    // Atualiza a lista de domínios disponíveis
+                    if (data.available_domains && data.available_domains.length > 0) {
+                        const domainsList = document.getElementById('domainsList');
+                        domainsList.innerHTML = ''; // Limpa a lista atual
+                        data.available_domains.forEach(domain => {
+                            addDomainToList(domain);
+                        });
+                        document.getElementById('availableDomains').style.display = 'block';
+                    }
+                    
+                    // Se o processamento terminou
+                    if (data.status === 'completed') {
+                        clearInterval(pollInterval);
+                        document.getElementById('statusMessage').textContent = 
+                            `Processamento concluído! ${data.available} domínios disponíveis encontrados.`;
+                        document.getElementById('statusMessage').className = 'status success';
+                        
+                        // Configura o botão de copiar todos
+                        const copyAllButton = document.getElementById('copyAllButton');
+                        copyAllButton.onclick = () => {
+                            const domains = data.available_domains.join('\n');
+                            navigator.clipboard.writeText(domains).then(() => {
+                                copyAllButton.textContent = 'Copiado!';
+                                setTimeout(() => {
+                                    copyAllButton.textContent = 'Copiar Todos';
+                                }, 2000);
+                            });
+                        };
+                        
+                        // Faz o download automático do arquivo
+                        if (data.output_file) {
+                            downloadFile(data.output_file);
+                        }
+                    }
+                } catch (error) {
+                    console.error('Erro ao verificar progresso:', error);
+                    document.getElementById('statusMessage').textContent = 'Erro na conexão. Tente novamente.';
+                    document.getElementById('statusMessage').className = 'status error';
+                    clearInterval(pollInterval);
                 }
-            };
+            }
             
-            eventSource.onerror = function(error) {
-                console.error('Erro na conexão SSE:', error);
-                eventSource.close();
-                document.getElementById('statusMessage').textContent = 'Erro na conexão. Tente novamente.';
-                document.getElementById('statusMessage').className = 'status error';
-            };
+            // Inicia o polling a cada 2 segundos
+            pollInterval = setInterval(checkProgress, 2000);
+            // Faz a primeira verificação imediatamente
+            checkProgress();
+        }
+
+        async function downloadFile(filename) {
+            try {
+                const response = await fetch(`/download/${filename}`);
+                if (!response.ok) {
+                    throw new Error('Erro ao baixar arquivo');
+                }
+                
+                const data = await response.json();
+                if (data.status === 'success') {
+                    // Cria um link temporário para download
+                    const blob = new Blob([data.file_data], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = data.filename;
+                    document.body.appendChild(a);
+                    a.click();
+                    window.URL.revokeObjectURL(url);
+                    document.body.removeChild(a);
+                }
+            } catch (error) {
+                console.error('Erro ao baixar arquivo:', error);
+                alert('Erro ao baixar o arquivo. Tente novamente.');
+            }
         }
 
         // Função para adicionar um domínio à lista
