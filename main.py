@@ -40,8 +40,33 @@ def extract_domain(url: str) -> str:
 async def verify_domain(domain: str) -> bool:
     """Verifica se um domínio está disponível."""
     try:
-        w = whois.whois(domain)
-        return w.domain_name is None
+        # Limpa o domínio antes de verificar
+        domain = domain.strip().lower()
+        if not domain:
+            return False
+            
+        # Verifica se é um domínio .br ou .com.br
+        if not domain.endswith(('.br', '.com.br')):
+            return False
+            
+        # Remove www se existir
+        if domain.startswith('www.'):
+            domain = domain[4:]
+            
+        # Tenta fazer a consulta whois
+        try:
+            w = whois.whois(domain)
+            # Verifica se o domínio está registrado
+            if w.domain_name is None:
+                logger.info(f"Domínio {domain} está disponível")
+                return True
+            else:
+                logger.info(f"Domínio {domain} não está disponível")
+                return False
+        except Exception as e:
+            logger.error(f"Erro na consulta whois para {domain}: {str(e)}")
+            return False
+            
     except Exception as e:
         logger.error(f"Erro ao verificar domínio {domain}: {str(e)}")
         return False
@@ -51,31 +76,55 @@ async def verify_domains(domains: List[str], process_id: str):
     available_domains = []
     processed = 0
     total = len(domains)
+    errors = 0
+    max_consecutive_errors = 3
+    consecutive_errors = 0
     
     for domain in domains:
         try:
+            # Se houver muitos erros consecutivos, faz uma pausa
+            if consecutive_errors >= max_consecutive_errors:
+                logger.warning("Muitos erros consecutivos, aguardando 5 segundos...")
+                await asyncio.sleep(5)
+                consecutive_errors = 0
+            
             is_available = await verify_domain(domain)
             processed += 1
             
             if is_available:
                 available_domains.append(domain)
+                consecutive_errors = 0  # Reset contador de erros
             
             # Atualiza o status
             processing_status[process_id].update({
+                "status": "processing",
                 "current_domain": domain,
                 "processed": processed,
                 "total": total,
                 "available": len(available_domains),
-                "available_domains": available_domains
+                "available_domains": available_domains,
+                "errors": errors
             })
             
-            # Pequena pausa entre verificações
+            # Pequena pausa entre verificações para evitar sobrecarga
             await asyncio.sleep(1)
             
         except Exception as e:
             logger.error(f"Erro ao verificar domínio {domain}: {str(e)}")
             processed += 1
+            errors += 1
+            consecutive_errors += 1
             continue
+    
+    # Atualiza o status final
+    processing_status[process_id].update({
+        "status": "completed",
+        "processed": total,
+        "total": total,
+        "available": len(available_domains),
+        "available_domains": available_domains,
+        "errors": errors
+    })
 
 @app.get("/", response_class=HTMLResponse)
 async def read_root(request: Request):
@@ -106,35 +155,46 @@ async def process_file(file: UploadFile = File(...)):
         try:
             # Primeiro tenta ler da coluna B (índice 1)
             if len(df.columns) > 1:
-                domains = df.iloc[:, 1].dropna().unique().tolist()
-                logger.info(f"Encontrados {len(domains)} domínios na coluna B")
+                col_data = df.iloc[:, 1].dropna()
+                if not col_data.empty:
+                    domains = col_data.unique().tolist()
+                    logger.info(f"Encontrados {len(domains)} domínios na coluna B")
             
             # Se não encontrou domínios na coluna B, tenta outras colunas
             if not domains:
                 # Procura por colunas conhecidas
                 for col in df.columns:
                     if col in source_columns or col in target_columns or col in domain_columns:
-                        new_domains = df[col].dropna().unique().tolist()
-                        domains.extend(new_domains)
-                        logger.info(f"Encontrados {len(new_domains)} domínios na coluna {col}")
+                        col_data = df[col].dropna()
+                        if not col_data.empty:
+                            new_domains = col_data.unique().tolist()
+                            domains.extend(new_domains)
+                            logger.info(f"Encontrados {len(new_domains)} domínios na coluna {col}")
             
             # Se ainda não encontrou domínios, tenta qualquer coluna que pareça conter URLs
             if not domains:
                 for col in df.columns:
                     try:
-                        sample = str(df[col].iloc[0]).lower()
-                        if 'http' in sample or '.br' in sample:
-                            new_domains = df[col].dropna().unique().tolist()
-                            domains.extend(new_domains)
-                            logger.info(f"Encontrados {len(new_domains)} domínios na coluna {col}")
+                        col_data = df[col].dropna()
+                        if not col_data.empty:
+                            sample = str(col_data.iloc[0]).lower()
+                            if 'http' in sample or '.br' in sample:
+                                new_domains = col_data.unique().tolist()
+                                domains.extend(new_domains)
+                                logger.info(f"Encontrados {len(new_domains)} domínios na coluna {col}")
                     except:
                         continue
+                        
+            if not domains:
+                raise ValueError("Nenhum domínio encontrado no arquivo")
+                
         except Exception as e:
             logger.error(f"Erro ao extrair domínios das colunas: {str(e)}")
             raise ValueError("Erro ao processar as colunas do arquivo. Verifique o formato do arquivo.")
         
-        # Remove duplicatas
-        domains = list(set(domains))
+        # Remove duplicatas e valores inválidos
+        domains = [d for d in set(domains) if d and isinstance(d, (str, int, float))]
+        domains = [str(d).strip() for d in domains]  # Converte tudo para string
         logger.info(f"Total de domínios encontrados (com duplicatas removidas): {len(domains)}")
         
         # Limpa os domínios
@@ -164,7 +224,8 @@ async def process_file(file: UploadFile = File(...)):
             "available": 0,
             "available_domains": [],
             "current_domain": "",
-            "error": None
+            "error": None,
+            "errors": 0
         }
         
         # Inicia o processamento em background
