@@ -43,8 +43,21 @@ def extract_domain(url: str) -> str:
         url = re.split(r'[/\s]', url)[0]
         # Remove qualquer parâmetro que possa ter ficado
         url = url.split('?')[0].split('#')[0]
+        # Remove qualquer texto após o domínio
+        url = url.split(':')[0]  # Remove porta se houver
         # Limpa o domínio
         domain = url.strip().lower()
+        
+        # Verifica se é um subdomínio e extrai o domínio principal
+        parts = domain.split('.')
+        if len(parts) > 2:
+            # Se termina em .com.br, pega os últimos 3 níveis
+            if domain.endswith('.com.br'):
+                domain = '.'.join(parts[-3:])
+            # Se termina em .br, pega os últimos 2 níveis
+            elif domain.endswith('.br'):
+                domain = '.'.join(parts[-2:])
+        
         return domain
     except Exception as e:
         logger.error(f"Erro ao extrair domínio de {url}: {str(e)}")
@@ -176,11 +189,15 @@ async def process_file(file: UploadFile = File(...)):
                 if len(df.columns) > 2:
                     col_data = df.iloc[:, 2].dropna().astype(str)  # Coluna C (índice 2)
                     if not col_data.empty:
-                        domains.extend(col_data.tolist())
+                        # Para backlinks, processa cada URL para extrair o domínio
+                        for url in col_data:
+                            domain = extract_domain(url)
+                            if domain:
+                                domains.append(domain)
                         logger.info(f"Arquivo de backlinks - Encontrados {len(domains)} domínios na coluna C")
             
             elif 'outbound' in filename_lower:
-                # Para arquivos outbound, usa a coluna B
+                # Para arquivos outbound, usa a coluna B que já contém domínios
                 if len(df.columns) > 1:
                     col_data = df.iloc[:, 1].dropna().astype(str)  # Coluna B (índice 1)
                     if not col_data.empty:
@@ -196,7 +213,10 @@ async def process_file(file: UploadFile = File(...)):
                     # Se encontrou coluna de domínio, usa ela
                     for col in domain_columns:
                         col_data = df[col].dropna().astype(str)
-                        domains.extend(col_data.tolist())
+                        for value in col_data:
+                            domain = extract_domain(value)
+                            if domain:
+                                domains.append(domain)
                     logger.info(f"Encontrados {len(domains)} domínios na(s) coluna(s) de domínio")
                 
                 # Se ainda não encontrou, tenta outras colunas
@@ -205,7 +225,10 @@ async def process_file(file: UploadFile = File(...)):
                         try:
                             col_data = df[col].dropna().astype(str)
                             if not col_data.empty and any(('.br' in str(x).lower() or 'http' in str(x).lower()) for x in col_data.head()):
-                                domains.extend(col_data.tolist())
+                                for value in col_data:
+                                    domain = extract_domain(value)
+                                    if domain:
+                                        domains.append(domain)
                                 logger.info(f"Encontrados domínios na coluna {col}")
                         except Exception as col_error:
                             logger.error(f"Erro ao processar coluna {col}: {str(col_error)}")
@@ -218,21 +241,9 @@ async def process_file(file: UploadFile = File(...)):
             logger.error(f"Erro ao extrair domínios: {str(e)}")
             raise ValueError("Erro ao processar as colunas do arquivo. Verifique o formato do arquivo.")
         
-        # Limpa e filtra os domínios
-        cleaned_domains = []
-        for domain in domains:
-            try:
-                clean_domain = extract_domain(str(domain))
-                if clean_domain and clean_domain.endswith(('.br', '.com.br')):
-                    cleaned_domains.append(clean_domain)
-                    logger.info(f"Domínio extraído: {clean_domain}")
-            except Exception as clean_error:
-                logger.error(f"Erro ao limpar domínio {domain}: {str(clean_error)}")
-                continue
-        
-        # Remove duplicatas
-        domains = list(set(cleaned_domains))
-        logger.info(f"Total de domínios únicos encontrados: {len(domains)}")
+        # Remove duplicatas e filtra domínios .br/.com.br
+        domains = [d for d in set(domains) if d and d.endswith(('.br', '.com.br'))]
+        logger.info(f"Total de domínios únicos .br/.com.br encontrados: {len(domains)}")
         
         if not domains:
             raise ValueError("Nenhum domínio .br/.com.br válido encontrado no arquivo")
