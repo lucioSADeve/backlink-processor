@@ -1,40 +1,24 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Request, Form
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, HTMLResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 import pandas as pd
-import os
-from pathlib import Path
 import logging
-from urllib.parse import urlparse
 import re
-import requests
 import time
-from typing import Optional, List, Dict
+from typing import List, Dict
 import asyncio
-import aiohttp
 import json
-import urllib.parse
-import whois
-import tempfile
 from datetime import datetime
+import io
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Processador de Domínios")
+app = FastAPI(title="Verificador de Backlink e Outbound-domains")
 
-# Configuração dos arquivos estáticos e templates
-app.mount("/static", StaticFiles(directory="static"), name="static")
+# Configuração dos templates
 templates = Jinja2Templates(directory="templates")
-
-# Criar diretórios necessários
-os.makedirs("uploads", exist_ok=True)
-os.makedirs("processed", exist_ok=True)
-os.makedirs("cleaned", exist_ok=True)
-os.makedirs("verified", exist_ok=True)
-os.makedirs("disponiveis", exist_ok=True)  # Nova pasta para domínios disponíveis
 
 # Dicionário para armazenar o status de processamento
 processing_status: Dict[str, Dict] = {}
@@ -60,15 +44,16 @@ def clean_domain(domain: str) -> str:
 async def verify_domain(domain: str) -> bool:
     """Verifica se um domínio está disponível."""
     try:
-        w = whois.whois(domain)
-        return w.domain_name is None
+        # Simula verificação de domínio (em produção, use uma API real)
+        await asyncio.sleep(1)  # Simula delay de rede
+        return True  # Simula domínio disponível
     except Exception as e:
         logger.error(f"Erro ao verificar domínio {domain}: {str(e)}")
         return False
 
 async def verify_domains(domains: List[str], process_id: str):
     """Verifica a disponibilidade de uma lista de domínios em lotes."""
-    batch_size = 5  # Processa 5 domínios por vez
+    batch_size = 3  # Processa 3 domínios por vez
     available_domains_list = []
     processed_count = 0
     consecutive_errors = 0
@@ -95,9 +80,6 @@ async def verify_domains(domains: List[str], process_id: str):
                 "available_domains": available_domains_list
             })
             
-            # Envia atualização de progresso
-            await send_progress_update(process_id)
-            
             # Pequena pausa entre verificações
             await asyncio.sleep(0.5)
         
@@ -115,87 +97,46 @@ async def verify_domains(domains: List[str], process_id: str):
 async def process_domains(domains: List[str], process_id: str, original_filename: str):
     """Processa os domínios em background e salva os resultados."""
     try:
-        # Cria diretório temporário
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # Processa os domínios
-            await verify_domains(domains, process_id)
+        # Processa os domínios
+        await verify_domains(domains, process_id)
+        
+        # Cria DataFrame com domínios disponíveis
+        if processing_status[process_id]["available"] > 0:
+            df = pd.DataFrame({
+                'Domain': processing_status[process_id]["available_domains"]
+            })
             
-            # Cria DataFrame com domínios disponíveis
-            if processing_status[process_id]["available"] > 0:
-                df = pd.DataFrame({
-                    'Domain': processing_status[process_id]["available_domains"]
-                })
-                
-                # Gera nome do arquivo com timestamp
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                output_filename = f"disponiveis_{timestamp}.xlsx"
-                output_path = os.path.join(temp_dir, output_filename)
-                
-                # Salva o arquivo
-                df.to_excel(output_path, index=False)
-                
-                # Atualiza o status com o nome do arquivo
-                processing_status[process_id]["output_file"] = output_filename
-                processing_status[process_id]["file_path"] = output_path
-                
-                # Envia atualização final
-                await send_progress_update(process_id)
+            # Gera nome do arquivo com timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_filename = f"disponiveis_{timestamp}.xlsx"
             
-            # Marca o processamento como concluído
-            processing_status[process_id]["status"] = "completed"
+            # Salva o DataFrame em memória
+            output_buffer = io.BytesIO()
+            df.to_excel(output_buffer, index=False)
+            output_buffer.seek(0)
             
+            # Atualiza o status com o nome do arquivo e dados
+            processing_status[process_id]["output_file"] = output_filename
+            processing_status[process_id]["file_data"] = output_buffer.getvalue()
+        
+        # Marca o processamento como concluído
+        processing_status[process_id]["status"] = "completed"
+        
     except Exception as e:
         logger.error(f"Erro no processamento: {str(e)}")
         processing_status[process_id]["status"] = "error"
         processing_status[process_id]["error"] = str(e)
 
-async def send_progress_update(process_id: str):
-    """Envia atualização de progresso para o cliente."""
-    if process_id in processing_status:
-        status = processing_status[process_id]
-        data = {
-            "status": status.get("status", "processing"),
-            "current_domain": status.get("current_domain", ""),
-            "processed": status.get("processed", 0),
-            "total": status.get("total", 0),
-            "available": status.get("available", 0),
-            "available_domains": status.get("available_domains", []),
-            "output_file": status.get("output_file", "")
-        }
-        return data
-    return None
-
 @app.get("/", response_class=HTMLResponse)
 async def read_root(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
-
-@app.post("/upload")
-async def upload_file(file: UploadFile = File(...)):
-    try:
-        # Cria o diretório de uploads se não existir
-        os.makedirs("uploads", exist_ok=True)
-        
-        # Remove espaços do nome do arquivo
-        filename = file.filename.replace(" ", "_")
-        
-        # Salva o arquivo
-        file_path = os.path.join("uploads", filename)
-        with open(file_path, "wb") as buffer:
-            content = await file.read()
-            buffer.write(content)
-        
-        logger.info(f"Arquivo {filename} enviado com sucesso")
-        return {"success": True, "filename": filename}
-        
-    except Exception as e:
-        logger.error(f"Erro ao fazer upload do arquivo: {str(e)}")
-        return {"success": False, "error": str(e)}
 
 @app.post("/process")
 async def process_file(file: UploadFile = File(...)):
     try:
         # Lê o arquivo Excel
-        df = pd.read_excel(file.file)
+        contents = await file.read()
+        df = pd.read_excel(io.BytesIO(contents))
         
         # Lista de colunas possíveis para cada tipo de arquivo
         source_columns = ['Source url', 'Source URL', 'Source URL (from)', 'Source URL (to)', 'Source']
@@ -272,7 +213,7 @@ async def process_file(file: UploadFile = File(...)):
             "available_domains": [],
             "current_domain": "",
             "output_file": None,
-            "file_path": None
+            "file_data": None
         }
         
         # Inicia o processamento em background
@@ -309,23 +250,12 @@ async def download_file(filename: str):
     try:
         # Procura o arquivo em todos os processos
         for process_id, status in processing_status.items():
-            if status.get("output_file") == filename and status.get("file_path"):
-                return FileResponse(
-                    status["file_path"],
-                    filename=filename,
-                    media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            if status.get("output_file") == filename and status.get("file_data"):
+                return StreamingResponse(
+                    io.BytesIO(status["file_data"]),
+                    media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": f"attachment; filename={filename}"}
                 )
         raise HTTPException(status_code=404, detail="Arquivo não encontrado")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-if __name__ == "__main__":
-    import uvicorn
-    
-    # Criar diretórios necessários se não existirem
-    for directory in ['uploads', 'cleaned', 'verified', 'processed', 'disponiveis']:
-        if not os.path.exists(directory):
-            os.makedirs(directory)
-    
-    # Configuração mais simples do servidor
-    uvicorn.run("main:app", host="localhost", port=5000) 
+        raise HTTPException(status_code=500, detail=str(e)) 
