@@ -11,6 +11,7 @@ import json
 from datetime import datetime
 import io
 import whois
+from concurrent.futures import ThreadPoolExecutor
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
@@ -24,9 +25,12 @@ templates = Jinja2Templates(directory="templates")
 # Dicionário para armazenar o status de processamento
 processing_status: Dict[str, Dict] = {}
 
+# Pool de threads para processamento paralelo
+thread_pool = ThreadPoolExecutor(max_workers=3)
+
 def extract_domain(url: str) -> str:
     """Extrai o domínio de uma URL."""
-    if not url:
+    if not url or not isinstance(url, str):
         return ""
     try:
         # Remove protocolo e www se existirem
@@ -37,32 +41,19 @@ def extract_domain(url: str) -> str:
     except:
         return ""
 
-async def verify_domain(domain: str) -> bool:
-    """Verifica se um domínio está disponível."""
+def verify_domain_sync(domain: str) -> bool:
+    """Versão síncrona da verificação de domínio."""
     try:
-        # Limpa o domínio antes de verificar
         domain = domain.strip().lower()
-        if not domain:
+        if not domain or not domain.endswith(('.br', '.com.br')):
             return False
             
-        # Verifica se é um domínio .br ou .com.br
-        if not domain.endswith(('.br', '.com.br')):
-            return False
-            
-        # Remove www se existir
         if domain.startswith('www.'):
             domain = domain[4:]
             
-        # Tenta fazer a consulta whois
         try:
             w = whois.whois(domain)
-            # Verifica se o domínio está registrado
-            if w.domain_name is None:
-                logger.info(f"Domínio {domain} está disponível")
-                return True
-            else:
-                logger.info(f"Domínio {domain} não está disponível")
-                return False
+            return w.domain_name is None
         except Exception as e:
             logger.error(f"Erro na consulta whois para {domain}: {str(e)}")
             return False
@@ -71,60 +62,70 @@ async def verify_domain(domain: str) -> bool:
         logger.error(f"Erro ao verificar domínio {domain}: {str(e)}")
         return False
 
+async def verify_domain(domain: str) -> bool:
+    """Versão assíncrona da verificação de domínio usando thread pool."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(thread_pool, verify_domain_sync, domain)
+
 async def verify_domains(domains: List[str], process_id: str):
     """Verifica a disponibilidade de uma lista de domínios."""
     available_domains = []
     processed = 0
     total = len(domains)
     errors = 0
-    max_consecutive_errors = 3
-    consecutive_errors = 0
+    batch_size = 5  # Processa em lotes para evitar timeout
     
-    for domain in domains:
-        try:
-            # Se houver muitos erros consecutivos, faz uma pausa
-            if consecutive_errors >= max_consecutive_errors:
-                logger.warning("Muitos erros consecutivos, aguardando 5 segundos...")
-                await asyncio.sleep(5)
-                consecutive_errors = 0
+    try:
+        for i in range(0, total, batch_size):
+            batch = domains[i:i + batch_size]
+            tasks = [verify_domain(domain) for domain in batch]
             
-            is_available = await verify_domain(domain)
-            processed += 1
+            try:
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                
+                for domain, result in zip(batch, results):
+                    processed += 1
+                    
+                    if isinstance(result, Exception):
+                        errors += 1
+                        logger.error(f"Erro ao verificar {domain}: {str(result)}")
+                        continue
+                        
+                    if result:
+                        available_domains.append(domain)
+                    
+                    # Atualiza o status
+                    processing_status[process_id].update({
+                        "status": "processing",
+                        "current_domain": domain,
+                        "processed": processed,
+                        "total": total,
+                        "available": len(available_domains),
+                        "available_domains": available_domains,
+                        "errors": errors
+                    })
+                    
+            except Exception as batch_error:
+                logger.error(f"Erro no processamento do lote: {str(batch_error)}")
+                errors += len(batch)
+                processed += len(batch)
+                
+            # Pequena pausa entre lotes
+            await asyncio.sleep(0.5)
             
-            if is_available:
-                available_domains.append(domain)
-                consecutive_errors = 0  # Reset contador de erros
-            
-            # Atualiza o status
-            processing_status[process_id].update({
-                "status": "processing",
-                "current_domain": domain,
-                "processed": processed,
-                "total": total,
-                "available": len(available_domains),
-                "available_domains": available_domains,
-                "errors": errors
-            })
-            
-            # Pequena pausa entre verificações para evitar sobrecarga
-            await asyncio.sleep(1)
-            
-        except Exception as e:
-            logger.error(f"Erro ao verificar domínio {domain}: {str(e)}")
-            processed += 1
-            errors += 1
-            consecutive_errors += 1
-            continue
-    
-    # Atualiza o status final
-    processing_status[process_id].update({
-        "status": "completed",
-        "processed": total,
-        "total": total,
-        "available": len(available_domains),
-        "available_domains": available_domains,
-        "errors": errors
-    })
+    except Exception as e:
+        logger.error(f"Erro no processamento principal: {str(e)}")
+        
+    finally:
+        # Atualiza o status final
+        processing_status[process_id].update({
+            "status": "completed",
+            "processed": processed,
+            "total": total,
+            "available": len(available_domains),
+            "available_domains": available_domains,
+            "errors": errors
+        })
 
 @app.get("/", response_class=HTMLResponse)
 async def read_root(request: Request):
@@ -133,11 +134,9 @@ async def read_root(request: Request):
 @app.post("/process")
 async def process_file(file: UploadFile = File(...)):
     try:
-        # Verifica se é um arquivo Excel
         if not file.filename.endswith(('.xlsx', '.xls')):
             raise ValueError("Por favor, envie apenas arquivos Excel (.xlsx ou .xls)")
 
-        # Lê o arquivo Excel com tratamento de erro
         try:
             contents = await file.read()
             df = pd.read_excel(io.BytesIO(contents), engine='openpyxl')
@@ -145,43 +144,22 @@ async def process_file(file: UploadFile = File(...)):
             logger.error(f"Erro ao ler arquivo Excel: {str(e)}")
             raise ValueError("Erro ao ler o arquivo Excel. Verifique se o arquivo está corrompido ou no formato correto.")
         
-        # Lista de colunas possíveis
-        source_columns = ['Source url', 'Source URL', 'Source URL (from)', 'Source URL (to)', 'Source']
-        target_columns = ['Target url', 'Target URL', 'Target URL (from)', 'Target URL (to)', 'Target']
-        domain_columns = ['Domain', 'Domain ascore', 'URL', 'Url']
-        
         domains = []
         
         try:
             # Primeiro tenta ler da coluna B (índice 1)
             if len(df.columns) > 1:
-                col_data = df.iloc[:, 1].dropna()
+                col_data = df.iloc[:, 1].dropna().astype(str)
                 if not col_data.empty:
-                    domains = col_data.unique().tolist()
-                    logger.info(f"Encontrados {len(domains)} domínios na coluna B")
+                    domains.extend(col_data.tolist())
             
-            # Se não encontrou domínios na coluna B, tenta outras colunas
-            if not domains:
-                # Procura por colunas conhecidas
-                for col in df.columns:
-                    if col in source_columns or col in target_columns or col in domain_columns:
-                        col_data = df[col].dropna()
-                        if not col_data.empty:
-                            new_domains = col_data.unique().tolist()
-                            domains.extend(new_domains)
-                            logger.info(f"Encontrados {len(new_domains)} domínios na coluna {col}")
-            
-            # Se ainda não encontrou domínios, tenta qualquer coluna que pareça conter URLs
+            # Se não encontrou domínios, tenta outras colunas
             if not domains:
                 for col in df.columns:
                     try:
-                        col_data = df[col].dropna()
-                        if not col_data.empty:
-                            sample = str(col_data.iloc[0]).lower()
-                            if 'http' in sample or '.br' in sample:
-                                new_domains = col_data.unique().tolist()
-                                domains.extend(new_domains)
-                                logger.info(f"Encontrados {len(new_domains)} domínios na coluna {col}")
+                        col_data = df[col].dropna().astype(str)
+                        if not col_data.empty and any('.br' in str(x).lower() for x in col_data.head()):
+                            domains.extend(col_data.tolist())
                     except:
                         continue
                         
@@ -189,30 +167,28 @@ async def process_file(file: UploadFile = File(...)):
                 raise ValueError("Nenhum domínio encontrado no arquivo")
                 
         except Exception as e:
-            logger.error(f"Erro ao extrair domínios das colunas: {str(e)}")
+            logger.error(f"Erro ao extrair domínios: {str(e)}")
             raise ValueError("Erro ao processar as colunas do arquivo. Verifique o formato do arquivo.")
         
-        # Remove duplicatas e valores inválidos
-        domains = [d for d in set(domains) if d and isinstance(d, (str, int, float))]
-        domains = [str(d).strip() for d in domains]  # Converte tudo para string
-        logger.info(f"Total de domínios encontrados (com duplicatas removidas): {len(domains)}")
-        
-        # Limpa os domínios
+        # Limpa e filtra os domínios
         cleaned_domains = []
         for domain in domains:
             try:
-                clean_domain = extract_domain(domain)
+                clean_domain = extract_domain(str(domain))
                 if clean_domain and clean_domain.endswith(('.br', '.com.br')):
                     cleaned_domains.append(clean_domain)
             except:
                 continue
         
-        domains = list(set(cleaned_domains))  # Remove duplicatas novamente após limpeza
-        logger.info(f"Total de domínios .br/.com.br válidos: {len(domains)}")
+        # Remove duplicatas
+        domains = list(set(cleaned_domains))
         
         if not domains:
             raise ValueError("Nenhum domínio .br/.com.br válido encontrado no arquivo")
         
+        if len(domains) > 100:
+            domains = domains[:100]  # Limita a 100 domínios para evitar timeout
+            
         # Gera um ID único para este processamento
         process_id = str(time.time())
         
@@ -224,7 +200,6 @@ async def process_file(file: UploadFile = File(...)):
             "available": 0,
             "available_domains": [],
             "current_domain": "",
-            "error": None,
             "errors": 0
         }
         
@@ -237,7 +212,7 @@ async def process_file(file: UploadFile = File(...)):
         logger.error(f"Erro de validação: {str(e)}")
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.error(f"Erro inesperado ao processar arquivo: {str(e)}")
+        logger.error(f"Erro inesperado: {str(e)}")
         raise HTTPException(status_code=500, detail="Erro interno ao processar o arquivo. Por favor, tente novamente.")
 
 @app.get("/progress/{process_id}")
