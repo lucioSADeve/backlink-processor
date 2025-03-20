@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Verificador de Backlink e Outbound-domains</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .drag-area {
+            border: 2px dashed #ccc;
+            padding: 20px;
+            text-align: center;
+            background-color: white;
+            border-radius: 5px;
+            margin-bottom: 20px;
+            cursor: pointer;
+        }
+        .drag-area.active {
+            border-color: #4CAF50;
+        }
+        .file-info {
+            margin: 10px 0;
+            padding: 10px;
+            background-color: #e9ecef;
+            border-radius: 5px;
+            display: none;
+        }
+        .status {
+            margin: 10px 0;
+            padding: 10px;
+            border-radius: 5px;
+        }
+        .success {
+            background-color: #d4edda;
+            color: #155724;
+        }
+        .error {
+            background-color: #f8d7da;
+            color: #721c24;
+        }
+        .processing {
+            background-color: #cce5ff;
+            color: #004085;
+        }
+        .download-link {
+            display: inline-block;
+            margin-top: 10px;
+            padding: 10px 20px;
+            background-color: #4CAF50;
+            color: white;
+            text-decoration: none;
+            border-radius: 5px;
+        }
+        .download-link:hover {
+            background-color: #45a049;
+        }
+        .progress-container {
+            margin-top: 20px;
+            text-align: center;
+        }
+        .progress-info {
+            margin-top: 10px;
+            font-size: 14px;
+            color: #666;
+        }
+        .progress-bar {
+            width: 100%;
+            height: 20px;
+            background-color: #f0f0f0;
+            border-radius: 10px;
+            overflow: hidden;
+            margin-top: 10px;
+        }
+        .progress-fill {
+            width: 0%;
+            height: 100%;
+            background-color: #4CAF50;
+            transition: width 0.3s ease;
+        }
+        .status-message {
+            margin-top: 10px;
+            font-size: 14px;
+            color: #666;
+        }
+        .upload-container {
+            border: 2px dashed #ccc;
+            padding: 20px;
+            text-align: center;
+            background-color: white;
+            border-radius: 5px;
+            margin-bottom: 20px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        .upload-container.active {
+            border-color: #4CAF50;
+            background-color: #f8f9fa;
+        }
+        .upload-content {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 10px;
+        }
+        .upload-content i {
+            font-size: 48px;
+            color: #4CAF50;
+        }
+        .download-options {
+            margin-top: 20px;
+            text-align: center;
+            display: none;
+        }
+        .download-button {
+            display: inline-block;
+            padding: 10px 20px;
+            background-color: #4CAF50;
+            color: white;
+            text-decoration: none;
+            border-radius: 5px;
+            margin: 5px;
+            cursor: pointer;
+            border: none;
+        }
+        .download-button:hover {
+            background-color: #45a049;
+        }
+        .download-info {
+            margin-top: 10px;
+            font-size: 14px;
+            color: #666;
+        }
+        .available-domains {
+            margin-top: 20px;
+            padding: 15px;
+            background-color: #f8f9fa;
+            border-radius: 5px;
+            display: none;
+        }
+        .domains-list {
+            max-height: 300px;
+            overflow-y: auto;
+            margin: 10px 0;
+            padding: 10px;
+            background-color: white;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+        .domain-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px;
+            border-bottom: 1px solid #eee;
+        }
+        .domain-item:last-child {
+            border-bottom: none;
+        }
+        .copy-button {
+            padding: 5px 10px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+        .copy-button:hover {
+            background-color: #45a049;
+        }
+        .copy-all-button {
+            display: block;
+            width: 100%;
+            padding: 10px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            margin-top: 10px;
+        }
+        .copy-all-button:hover {
+            background-color: #45a049;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Processador de Backlinks</h1>
+        <div class="upload-container" id="dropZone">
+            <input type="file" id="fileInput" accept=".xlsx" style="display: none;">
+            <div class="upload-content">
+                <i class="fas fa-cloud-upload-alt"></i>
+                <p>Arraste e solte seu arquivo Excel aqui ou clique para selecionar</p>
+                <p class="file-info" id="fileInfo"></p>
+            </div>
+        </div>
+        <div class="progress-container" id="progressContainer" style="display: none;">
+            <div class="progress-info">
+                <p>Progresso: <span id="progressPercent">0</span>%</p>
+                <p>Processados: <span id="processedCount">0</span> de <span id="totalCount">0</span></p>
+                <p>Disponíveis: <span id="availableCount">0</span></p>
+                <p>Tempo estimado: <span id="estimatedTime">0</span> segundos</p>
+            </div>
+            <div class="progress-bar">
+                <div class="progress-fill" id="progressFill"></div>
+            </div>
+            <div class="status-message" id="statusMessage"></div>
+            <div class="available-domains" id="availableDomains">
+                <h3>Domínios Disponíveis</h3>
+                <div class="domains-list" id="domainsList"></div>
+                <button class="copy-all-button" id="copyAllButton">Copiar Todos os Domínios</button>
+            </div>
+            <div class="download-options" id="downloadOptions">
+                <div class="download-info">
+                    <p>O arquivo foi salvo na pasta 'disponiveis'</p>
+                    <p>Você pode baixá-lo manualmente clicando no botão abaixo:</p>
+                </div>
+                <button class="download-button" id="manualDownload">Baixar Arquivo Manualmente</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const dropZone = document.getElementById('dropZone');
+        const fileInput = document.getElementById('fileInput');
+        const fileInfo = document.getElementById('fileInfo');
+        const statusMessage = document.getElementById('statusMessage');
+        let isProcessing = false;
+        let startTime = null;
+        let totalDomains = 0;
+        let processedDomains = 0;
+        let availableDomains = 0;
+
+        // Eventos de drag and drop
+        dropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropZone.classList.add('active');
+        });
+
+        dropZone.addEventListener('dragleave', () => {
+            dropZone.classList.remove('active');
+        });
+
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('active');
+            handleFileUpload();
+        });
+
+        dropZone.addEventListener('click', () => {
+            fileInput.click();
+        });
+
+        fileInput.addEventListener('change', (e) => {
+            handleFileUpload();
+        });
+
+        async function handleFileUpload() {
+            const fileInput = document.getElementById('fileInput');
+            const file = fileInput.files[0];
+            
+            if (!file) {
+                alert('Por favor, selecione um arquivo');
+                return;
+            }
+            
+            try {
+                // Mostra a barra de progresso
+                document.getElementById('progressContainer').style.display = 'block';
+                document.getElementById('statusMessage').textContent = 'Enviando arquivo...';
+                
+                // Cria um objeto FormData para enviar o arquivo
+                const formData = new FormData();
+                formData.append('file', file);
+                
+                // Envia o arquivo
+                const response = await fetch('/process', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (!response.ok) {
+                    throw new Error('Erro ao processar arquivo');
+                }
+                
+                const data = await response.json();
+                
+                // Inicia o monitoramento de progresso
+                startProgressMonitoring(data.process_id);
+                
+            } catch (error) {
+                console.error('Erro:', error);
+                document.getElementById('statusMessage').textContent = 'Erro ao processar arquivo. Tente novamente.';
+                document.getElementById('statusMessage').className = 'status error';
+            }
+        }
+
+        function formatFileSize(bytes) {
+            if (bytes === 0) return '0 Bytes';
+            const k = 1024;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+
+        function showStatus(message, type) {
+            statusMessage.textContent = message;
+            statusMessage.className = 'status ' + type;
+        }
+
+        function updateProgress(processed, total, available) {
+            processedDomains = processed;
+            totalDomains = total;
+            availableDomains = available;
+            
+            const percent = total > 0 ? Math.round((processed / total) * 100) : 0;
+            document.getElementById('progressPercent').textContent = percent;
+            document.getElementById('processedCount').textContent = processed;
+            document.getElementById('totalCount').textContent = total;
+            document.getElementById('availableCount').textContent = available;
+            document.getElementById('progressFill').style.width = `${percent}%`;
+
+            if (startTime && processed > 0) {
+                const elapsed = (Date.now() - startTime) / 1000;
+                const remaining = Math.round((elapsed / processed) * (total - processed));
+                document.getElementById('estimatedTime').textContent = remaining;
+            } else {
+                document.getElementById('estimatedTime').textContent = '0';
+            }
+        }
+
+        function startProcessing() {
+            startTime = Date.now();
+            document.getElementById('progressContainer').style.display = 'block';
+            document.getElementById('statusMessage').textContent = 'Processando arquivo...';
+        }
+
+        function startProgressMonitoring(processId) {
+            const eventSource = new EventSource(`/progress/${processId}`);
+            
+            eventSource.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+                updateProgress(data.processed, data.total, data.available);
+                document.getElementById('statusMessage').textContent = `Processando: ${data.domain}`;
+                
+                // Atualiza a lista de domínios disponíveis
+                if (data.available_domains && data.available_domains.length > 0) {
+                    const domainsList = document.getElementById('domainsList');
+                    domainsList.innerHTML = ''; // Limpa a lista atual
+                    data.available_domains.forEach(domain => {
+                        addDomainToList(domain);
+                    });
+                    // Mostra a seção de domínios disponíveis
+                    document.getElementById('availableDomains').style.display = 'block';
+                }
+                
+                if (data.processed >= data.total) {
+                    eventSource.close();
+                    if (data.available > 0) {
+                        document.getElementById('statusMessage').textContent = `Processamento concluído! ${data.available} domínios disponíveis encontrados.`;
+                        
+                        // Configura o botão de copiar todos
+                        const copyAllButton = document.getElementById('copyAllButton');
+                        copyAllButton.onclick = function() {
+                            const domains = data.available_domains.join('\n');
+                            navigator.clipboard.writeText(domains).then(() => {
+                                alert('Todos os domínios foram copiados para a área de transferência!');
+                            }).catch(err => {
+                                console.error('Erro ao copiar:', err);
+                                alert('Erro ao copiar os domínios. Tente novamente.');
+                            });
+                        };
+                        
+                        // Inicia o download automático
+                        if (data.output_file) {
+                            window.location.href = `/download/${data.output_file}`;
+                        }
+                    } else {
+                        document.getElementById('statusMessage').textContent = 'Nenhum domínio disponível encontrado.';
+                    }
+                }
+            };
+            
+            eventSource.onerror = function(error) {
+                console.error('Erro no EventSource:', error);
+                eventSource.close();
+                document.getElementById('statusMessage').textContent = 'Erro ao receber atualizações de progresso';
+                document.getElementById('statusMessage').className = 'status error';
+            };
+        }
+
+        // Função para adicionar um domínio à lista
+        function addDomainToList(domain) {
+            const domainsList = document.getElementById('domainsList');
+            const domainItem = document.createElement('div');
+            domainItem.className = 'domain-item';
+            
+            const domainSpan = document.createElement('span');
+            domainSpan.textContent = domain;
+            
+            const copyButton = document.createElement('button');
+            copyButton.className = 'copy-button';
+            copyButton.textContent = 'Copiar';
+            copyButton.onclick = function() {
+                navigator.clipboard.writeText(domain).then(() => {
+                    copyButton.textContent = 'Copiado!';
+                    setTimeout(() => {
+                        copyButton.textContent = 'Copiar';
+                    }, 2000);
+                }).catch(err => {
+                    console.error('Erro ao copiar:', err);
+                    alert('Erro ao copiar o domínio. Tente novamente.');
+                });
+            };
+            
+            domainItem.appendChild(domainSpan);
+            domainItem.appendChild(copyButton);
+            domainsList.appendChild(domainItem);
+        }
+    </script>
+</body>
+</html> 
