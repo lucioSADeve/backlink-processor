@@ -1,5 +1,5 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException, Request, Form
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import pandas as pd
@@ -15,6 +15,9 @@ import asyncio
 import aiohttp
 import json
 import urllib.parse
+import whois
+import tempfile
+from datetime import datetime
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
@@ -33,199 +36,137 @@ os.makedirs("cleaned", exist_ok=True)
 os.makedirs("verified", exist_ok=True)
 os.makedirs("disponiveis", exist_ok=True)  # Nova pasta para domínios disponíveis
 
-# Dicionário para armazenar o progresso de cada processamento
-processing_status = {}
+# Dicionário para armazenar o status de processamento
+processing_status: Dict[str, Dict] = {}
 
-def extract_domain(url):
-    """Extrai o domínio de uma URL mantendo o TLD (.com.br, .br, etc)"""
+def extract_domain(url: str) -> str:
+    """Extrai o domínio de uma URL."""
+    if not url:
+        return ""
+    # Remove protocolo e www se existirem
+    url = re.sub(r'^https?://(www\.)?', '', url)
+    # Pega apenas o domínio (primeira parte antes da primeira barra)
+    domain = url.split('/')[0]
+    return domain.lower()
+
+def clean_domain(domain: str) -> str:
+    """Limpa o domínio removendo caracteres especiais."""
+    if not domain:
+        return ""
+    # Remove caracteres especiais e espaços
+    domain = re.sub(r'[^\w.-]', '', domain)
+    return domain.lower()
+
+async def verify_domain(domain: str) -> bool:
+    """Verifica se um domínio está disponível."""
     try:
-        # Remove espaços e converte para minúsculas
-        url = url.strip().lower()
-        # Adiciona http:// se não tiver protocolo
-        if not url.startswith(('http://', 'https://')):
-            url = 'http://' + url
-        # Extrai o domínio
-        domain = urlparse(url).netloc
-        # Remove www. se existir
-        domain = re.sub(r'^www\.', '', domain)
-        return domain
-    except:
-        return url.strip().lower()
-
-def clean_domains_from_backlinks(df):
-    """Limpa e organiza os domínios mantendo os dados originais"""
-    logger.info("Iniciando limpeza de domínios do arquivo de backlinks")
-    
-    # Criar uma cópia do DataFrame original
-    new_df = pd.DataFrame()
-    
-    # Identificar colunas que podem conter URLs
-    url_columns = []
-    for col in df.columns:
-        sample = df[col].astype(str).iloc[0]
-        if 'http' in sample.lower() or '.' in sample:
-            url_columns.append(col)
-            logger.info(f"Coluna com URLs encontrada: {col}")
-    
-    # Extrair e limpar domínios
-    if url_columns:
-        # Usar a primeira coluna que contém URLs
-        domains = df[url_columns[0]].astype(str).apply(extract_domain)
-    else:
-        # Se não encontrar URLs, usar a primeira coluna
-        domains = df.iloc[:, 0].astype(str).apply(extract_domain)
-    
-    # Criar DataFrame temporário com dados originais e domínios
-    temp_df = pd.DataFrame({
-        'original': df.iloc[:, 0],
-        'domain': domains
-    })
-    
-    # Filtrar apenas domínios válidos (.br e .com.br)
-    temp_df = temp_df[temp_df['domain'].apply(lambda x: x.endswith('.br') if isinstance(x, str) else False)]
-    
-    # Remover duplicatas mantendo a primeira ocorrência de cada domínio
-    temp_df = temp_df.drop_duplicates(subset='domain', keep='first')
-    
-    # Criar DataFrame final com a estrutura desejada
-    new_df = pd.DataFrame({
-        'A': temp_df['original'],
-        'B': temp_df['domain']
-    })
-    
-    logger.info(f"Total de domínios únicos .br/.com.br encontrados: {len(new_df)}")
-    return new_df
-
-async def check_domain_availability(domain: str) -> Optional[bool]:
-    """Verifica a disponibilidade do domínio no Registro.br usando a API WHOIS"""
-    try:
-        # Remove protocolo e www se existir
-        domain = domain.replace('http://', '').replace('https://', '').replace('www.', '')
-        
-        # Extrai apenas o domínio base (remove subdomínios)
-        parts = domain.split('.')
-        if len(parts) >= 3 and parts[-2:] == ['com', 'br']:
-            # Para domínios .com.br, pegamos as últimas 3 partes
-            domain = '.'.join(parts[-3:])
-        elif len(parts) >= 2 and parts[-1] == 'br':
-            # Para domínios .br, pegamos as últimas 2 partes
-            domain = '.'.join(parts[-2:])
-        else:
-            logger.warning(f"Domínio {domain} não é .br ou .com.br")
-            return None
-        
-        logger.info(f"Verificando disponibilidade do domínio: {domain}")
-        
-        # URL da API WHOIS do Registro.br
-        url = f"https://rdap.registro.br/domain/{domain}"
-        
-        # Headers necessários para a requisição
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'application/json',
-            'Connection': 'keep-alive'
-        }
-        
-        # Faz a requisição usando aiohttp
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=30) as response:
-                # Se retornar 404, o domínio está disponível
-                if response.status == 404:
-                    logger.info(f"Domínio {domain}: Disponível")
-                    return True
-                    
-                # Se retornar 200, o domínio está registrado
-                elif response.status == 200:
-                    logger.info(f"Domínio {domain}: Indisponível")
-                    return False
-                    
-                # Outros códigos de status são considerados erro
-                else:
-                    logger.error(f"Erro ao verificar domínio {domain}. Status code: {response.status}")
-                    return None
-                    
-    except asyncio.TimeoutError:
-        logger.error(f"Timeout ao verificar domínio {domain}")
-        return None
-    except aiohttp.ClientError as e:
-        logger.error(f"Erro na requisição para {domain}: {str(e)}")
-        return None
+        w = whois.whois(domain)
+        return w.domain_name is None
     except Exception as e:
         logger.error(f"Erro ao verificar domínio {domain}: {str(e)}")
-        return None
+        return False
 
-async def verify_domains(domains: List[str], process_id: str) -> List[Dict[str, str]]:
-    """
-    Verifica a disponibilidade de uma lista de domínios no Registro.br
-    Retorna uma lista de dicionários com o domínio e seu status
-    """
-    results = []
-    total_domains = len(domains)
-    processed_domains = 0
-    available_domains = 0
-    available_domains_list = []  # Lista para armazenar domínios disponíveis
+async def verify_domains(domains: List[str], process_id: str):
+    """Verifica a disponibilidade de uma lista de domínios em lotes."""
+    batch_size = 5  # Processa 5 domínios por vez
+    available_domains_list = []
+    processed_count = 0
     consecutive_errors = 0
-    base_delay = 3  # Delay base entre requisições
-    error_delay = 15  # Delay quando há erros consecutivos
-
-    for domain in domains:
-        try:
-            # Verifica disponibilidade
-            is_available = await check_domain_availability(domain)
-            processed_domains += 1
+    
+    for i in range(0, len(domains), batch_size):
+        batch = domains[i:i + batch_size]
+        tasks = []
+        
+        for domain in batch:
+            if consecutive_errors >= 3:
+                logger.warning("Muitos erros consecutivos, aguardando 5 segundos...")
+                await asyncio.sleep(5)
+                consecutive_errors = 0
             
-            if is_available:
-                available_domains += 1
-                available_domains_list.append(domain)  # Adiciona à lista de disponíveis
-                results.append({
-                    'domain': domain,
-                    'status': 'Sim'
-                })
+            tasks.append(verify_domain(domain))
+            processed_count += 1
             
-            # Atualiza o progresso
-            processing_status[process_id] = {
-                'processed': processed_domains,
-                'total': total_domains,
-                'available': available_domains,
-                'current_domain': domain,
-                'available_domains': available_domains_list  # Inclui a lista de domínios disponíveis
-            }
+            # Atualiza o status
+            processing_status[process_id].update({
+                "current_domain": domain,
+                "processed": processed_count,
+                "total": len(domains),
+                "available": len(available_domains_list),
+                "available_domains": available_domains_list
+            })
             
-            # Ajusta o delay baseado em erros consecutivos
-            if consecutive_errors > 0:
-                await asyncio.sleep(error_delay)
+            # Envia atualização de progresso
+            await send_progress_update(process_id)
+            
+            # Pequena pausa entre verificações
+            await asyncio.sleep(0.5)
+        
+        # Aguarda a conclusão do lote atual
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Processa os resultados
+        for domain, result in zip(batch, results):
+            if isinstance(result, bool) and result:
+                available_domains_list.append(domain)
                 consecutive_errors = 0
             else:
-                await asyncio.sleep(base_delay)
+                consecutive_errors += 1
+
+async def process_domains(domains: List[str], process_id: str, original_filename: str):
+    """Processa os domínios em background e salva os resultados."""
+    try:
+        # Cria diretório temporário
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Processa os domínios
+            await verify_domains(domains, process_id)
+            
+            # Cria DataFrame com domínios disponíveis
+            if processing_status[process_id]["available"] > 0:
+                df = pd.DataFrame({
+                    'Domain': processing_status[process_id]["available_domains"]
+                })
                 
-        except Exception as e:
-            logger.error(f"Erro ao verificar domínio {domain}: {str(e)}")
-            consecutive_errors += 1
-            processed_domains += 1
-            results.append({
-                'domain': domain,
-                'status': 'Erro'
-            })
-            await asyncio.sleep(error_delay)
-    
-    logger.info(f"Verificação concluída. Total: {total_domains}, Disponíveis: {available_domains}, Erros: {len(results) - available_domains}")
-    return results, processed_domains, total_domains, available_domains, available_domains_list
+                # Gera nome do arquivo com timestamp
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                output_filename = f"disponiveis_{timestamp}.xlsx"
+                output_path = os.path.join(temp_dir, output_filename)
+                
+                # Salva o arquivo
+                df.to_excel(output_path, index=False)
+                
+                # Atualiza o status com o nome do arquivo
+                processing_status[process_id]["output_file"] = output_filename
+                processing_status[process_id]["file_path"] = output_path
+                
+                # Envia atualização final
+                await send_progress_update(process_id)
+            
+            # Marca o processamento como concluído
+            processing_status[process_id]["status"] = "completed"
+            
+    except Exception as e:
+        logger.error(f"Erro no processamento: {str(e)}")
+        processing_status[process_id]["status"] = "error"
+        processing_status[process_id]["error"] = str(e)
 
-async def send_progress_update(domain: str, processed: int, total: int, available: int, output_file: str = None, available_domains: List[str] = None):
-    """Envia atualização de progresso para o cliente"""
-    progress_data = {
-        "domain": domain,
-        "processed": processed,
-        "total": total,
-        "available": available,
-        "percent": round((processed / total) * 100) if total > 0 else 0,
-        "output_file": output_file,
-        "available_domains": available_domains or []
-    }
-    return f"data: {json.dumps(progress_data)}\n\n"
+async def send_progress_update(process_id: str):
+    """Envia atualização de progresso para o cliente."""
+    if process_id in processing_status:
+        status = processing_status[process_id]
+        data = {
+            "status": status.get("status", "processing"),
+            "current_domain": status.get("current_domain", ""),
+            "processed": status.get("processed", 0),
+            "total": status.get("total", 0),
+            "available": status.get("available", 0),
+            "available_domains": status.get("available_domains", []),
+            "output_file": status.get("output_file", "")
+        }
+        return data
+    return None
 
-@app.get("/")
-async def home(request: Request):
+@app.get("/", response_class=HTMLResponse)
+async def read_root(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
 
 @app.post("/upload")
@@ -249,31 +190,6 @@ async def upload_file(file: UploadFile = File(...)):
     except Exception as e:
         logger.error(f"Erro ao fazer upload do arquivo: {str(e)}")
         return {"success": False, "error": str(e)}
-
-@app.get("/progress/{process_id}")
-async def get_progress(process_id: str):
-    """Endpoint para receber atualizações de progresso via SSE"""
-    async def event_generator():
-        while True:
-            if process_id in processing_status:
-                status = processing_status[process_id]
-                yield await send_progress_update(
-                    status['current_domain'],
-                    status['processed'],
-                    status['total'],
-                    status['available'],
-                    status.get('output_file'),
-                    status.get('available_domains', [])
-                )
-                
-                # Se o processamento terminou, remove o status
-                if status['processed'] >= status['total']:
-                    del processing_status[process_id]
-                    break
-            
-            await asyncio.sleep(0.5)
-    
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 @app.post("/process")
 async def process_file(file: UploadFile = File(...)):
@@ -347,6 +263,18 @@ async def process_file(file: UploadFile = File(...)):
         # Gera um ID único para este processamento
         process_id = str(time.time())
         
+        # Inicializa o status do processamento
+        processing_status[process_id] = {
+            "status": "processing",
+            "processed": 0,
+            "total": len(br_domains),
+            "available": 0,
+            "available_domains": [],
+            "current_domain": "",
+            "output_file": None,
+            "file_path": None
+        }
+        
         # Inicia o processamento em background
         asyncio.create_task(process_domains(br_domains, process_id, file.filename))
         
@@ -356,69 +284,39 @@ async def process_file(file: UploadFile = File(...)):
         logger.error(f"Erro ao processar arquivo: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-async def process_domains(domains: List[str], process_id: str, filename: str):
-    """Processa os domínios em background e salva o resultado"""
-    try:
-        # Verifica disponibilidade
-        results, processed, total, available, available_domains_list = await verify_domains(domains, process_id)
-        
-        # Cria DataFrame com resultados
-        results_df = pd.DataFrame(results)
-        
-        # Filtra apenas domínios disponíveis
-        available_df = results_df[results_df['status'] == 'Sim']
-        
-        if not available_df.empty:
-            # Salva apenas domínios disponíveis na pasta disponiveis
-            output_filename = f"disponiveis_{filename}"
-            output_path = os.path.join('disponiveis', output_filename)
-            available_df.to_excel(output_path, index=False)
-            logger.info(f"Arquivo com domínios disponíveis salvo em: {output_path}")
-            
-            # Atualiza o status com o nome do arquivo para download
-            processing_status[process_id]['output_file'] = output_filename
-        
-        # Atualiza o status final
-        processing_status[process_id] = {
-            'processed': processed,
-            'total': total,
-            'available': available,
-            'current_domain': 'Concluído',
-            'completed': True,
-            'available_domains': available_domains_list
-        }
-        
-    except Exception as e:
-        logger.error(f"Erro no processamento em background: {str(e)}")
-        processing_status[process_id] = {
-            'error': str(e),
-            'completed': True
-        }
+@app.get("/progress/{process_id}")
+async def get_progress(process_id: str):
+    """Endpoint para receber atualizações de progresso via SSE."""
+    async def event_generator():
+        while True:
+            if process_id not in processing_status:
+                yield "data: " + json.dumps({"error": "Processo não encontrado"}) + "\n\n"
+                break
+                
+            status = processing_status[process_id]
+            if status["status"] in ["completed", "error"]:
+                yield "data: " + json.dumps(status) + "\n\n"
+                break
+                
+            yield "data: " + json.dumps(status) + "\n\n"
+            await asyncio.sleep(1)
+    
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 @app.get("/download/{filename}")
 async def download_file(filename: str):
+    """Endpoint para download do arquivo de domínios disponíveis."""
     try:
-        # Remove caracteres especiais e espaços do nome do arquivo
-        clean_filename = re.sub(r'[^a-zA-Z0-9._-]', '_', filename)
-        
-        # Procurar o arquivo na pasta disponiveis
-        file_path = os.path.join("disponiveis", clean_filename)
-        
-        if os.path.exists(file_path):
-            logger.info(f"Iniciando download do arquivo: {file_path}")
-            return FileResponse(
-                file_path,
-                filename=clean_filename,
-                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                headers={
-                    "Content-Disposition": f"attachment; filename={clean_filename}"
-                }
-            )
-        
-        logger.error(f"Arquivo não encontrado: {file_path}")
+        # Procura o arquivo em todos os processos
+        for process_id, status in processing_status.items():
+            if status.get("output_file") == filename and status.get("file_path"):
+                return FileResponse(
+                    status["file_path"],
+                    filename=filename,
+                    media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
         raise HTTPException(status_code=404, detail="Arquivo não encontrado")
     except Exception as e:
-        logger.error(f"Erro ao baixar arquivo: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
