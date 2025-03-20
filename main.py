@@ -33,25 +33,32 @@ def extract_domain(url: str) -> str:
     if not url or not isinstance(url, str):
         return ""
     try:
-        # Remove protocolo e www se existirem
-        url = re.sub(r'^https?://(www\.)?', '', str(url).strip().lower())
-        # Remove tudo após a primeira barra ou espaço
-        domain = re.split(r'[/\s]', url)[0]
-        # Remove qualquer parâmetro
-        domain = domain.split('?')[0].split('#')[0]
-        # Remove porta se houver
-        domain = domain.split(':')[0]
+        # Remove espaços e converte para minúsculo
+        url = str(url).strip().lower()
         
-        # Verifica se é um domínio válido
-        if not re.match(r'^[a-z0-9.-]+\.[a-z]{2,}$', domain):
-            return ""
+        # Se já é um domínio limpo (sem http, www, etc)
+        if re.match(r'^[a-z0-9.-]+\.[a-z]{2,}$', url):
+            return url
             
-        # Se é um subdomínio, pega apenas o domínio principal
+        # Remove protocolo e www
+        url = re.sub(r'^https?://(www\.)?', '', url)
+        
+        # Pega apenas a parte do domínio (antes da primeira barra)
+        domain = url.split('/')[0].split('?')[0].split('#')[0].split(':')[0]
+        
+        # Remove qualquer subdomínio para domínios .br e .com.br
         parts = domain.split('.')
-        if domain.endswith('.com.br') and len(parts) > 3:
-            return '.'.join(parts[-3:])
-        elif domain.endswith('.br') and len(parts) > 2:
-            return '.'.join(parts[-2:])
+        if len(parts) > 2:
+            if domain.endswith('.com.br'):
+                # Pega apenas os últimos 3 níveis para .com.br
+                domain = '.'.join(parts[-3:])
+            elif domain.endswith('.br'):
+                # Pega apenas os últimos 2 níveis para .br
+                domain = '.'.join(parts[-2:])
+        
+        # Verifica se o domínio é válido
+        if not re.match(r'^[a-z0-9][a-z0-9.-]*\.[a-z0-9.-]+\.[a-z]{2,}$', domain):
+            return ""
             
         return domain
         
@@ -68,7 +75,6 @@ def verify_domain_sync(domain: str) -> bool:
             
         # Verifica se é um domínio .br ou .com.br
         if not domain.endswith(('.br', '.com.br')):
-            logger.info(f"Domínio {domain} não é .br ou .com.br")
             return False
             
         if domain.startswith('www.'):
@@ -76,15 +82,7 @@ def verify_domain_sync(domain: str) -> bool:
             
         try:
             w = whois.whois(domain)
-            is_available = w.domain_name is None
-            
-            if is_available:
-                logger.info(f"Domínio {domain} está disponível")
-            else:
-                logger.info(f"Domínio {domain} não está disponível")
-                
-            return is_available
-            
+            return w.domain_name is None
         except Exception as e:
             logger.error(f"Erro na consulta whois para {domain}: {str(e)}")
             return False
@@ -200,9 +198,19 @@ async def process_file(file: UploadFile = File(...)):
             
             # Processa cada valor da coluna
             for value in col_data:
-                domain = extract_domain(value)
-                if domain and domain.endswith(('.br', '.com.br')):
-                    domains.append(domain)
+                if value and isinstance(value, str):
+                    # Para backlinks, extrai o domínio da segunda URL (após o espaço)
+                    if 'back' in filename_lower and 'link' in filename_lower:
+                        urls = value.split()
+                        if len(urls) > 1:
+                            domain = extract_domain(urls[1])  # Pega a segunda URL
+                        else:
+                            domain = extract_domain(value)
+                    else:
+                        domain = extract_domain(value)
+                        
+                    if domain and domain.endswith(('.br', '.com.br')):
+                        domains.append(domain)
             
             # Remove duplicatas
             domains = list(set(domains))
